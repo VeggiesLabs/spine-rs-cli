@@ -1,0 +1,21 @@
+[package]
+name = "spine-renderer-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rusty_spine = "^0.8"
+imageproc = "0.23"
+anyhow = "1.0"
+glam = "0.23"
+miniquad = "0.3.16"
+image = { version = "0.24", default-features = false, features = [
+    "png",
+    "webp",
+    "jpeg",
+] }
+clap = { version = "4.3", features = ["derive"] }
+
+[[bin]]
+name = "spine-renderer-rs"
+path = "src/main.rs"
