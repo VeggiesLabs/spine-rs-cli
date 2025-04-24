@@ -138,7 +138,7 @@ pub fn render(
     for skin in skins_to_add {
         let s = skeleton_data
             .find_skin(skin)
-            .expect("Additional skin not found");
+            .expect(format!("Additional skin not found {:?}", skin).as_str());
         unsafe { composite.add_skin(&s) };
     }
     let composite_static: &'static Skin = Box::leak(Box::new(composite));
