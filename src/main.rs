@@ -11,7 +11,7 @@ use std::{
 };
 mod spine;
 use miniquad::*;
-use spine::{Stage, SpineInfo, SpineSkeletonPath, SpineTexture};
+use spine::{SpineInfo, SpineSkeletonPath, SpineTexture, Stage};
 
 // 1. Struct globale du CLI
 #[derive(Parser, Debug)]
@@ -38,8 +38,8 @@ enum Commands {
         #[arg(long, value_name = "FILE", default_value = "none")]
         out: PathBuf,
 
-        /// Skin de base (ex. "broccoli")
-        #[arg(long, default_value = "BASES/Broccoli_Base")]
+        /// Skin de base
+        #[arg(long, default_value = "")]
         base_skin: String,
 
         /// Liste de skins additionnels à fusionner (séparés par virgule)
@@ -117,7 +117,6 @@ pub fn render(
             });
     });
 
-
     // Charger l’atlas Spine
     let atlas = Arc::new(Atlas::new_from_file(atlas_path)?);
 
@@ -126,10 +125,16 @@ pub fn render(
     let skeleton_data = Arc::new(skeleton_json.read_skeleton_data_file(json_path)?);
 
     // Composer le skin
-    let mut composite = skeleton_data
-        .find_skin(base_skin)
-        .expect("Base skin not found")
-        .clone();
+    let mut composite;
+    if base_skin.is_empty() {
+        composite = Skin::new("composite");
+    } else {
+        composite = skeleton_data
+            .find_skin(base_skin)
+            .expect("Base skin not found")
+            .clone();
+    }
+
     for skin in skins_to_add {
         let s = skeleton_data
             .find_skin(skin)
@@ -154,7 +159,7 @@ pub fn render(
     let skeleton_path_static: &'static str = Box::leak(skeleton_path_string);
 
     let conf = conf::Conf {
-        window_title: "rusty_spine".to_owned(),
+        window_title: "spine-rs-cli".to_owned(),
         high_dpi: true,
         ..Default::default()
     };
@@ -192,7 +197,13 @@ pub fn render(
     );
 
     miniquad::start(conf, |ctx| {
-        Box::new(Stage::new(ctx, texture_delete_queue, spine_info_static, render_png, output_path_static))
+        Box::new(Stage::new(
+            ctx,
+            texture_delete_queue,
+            spine_info_static,
+            render_png,
+            output_path_static,
+        ))
     });
 
     Ok(())
