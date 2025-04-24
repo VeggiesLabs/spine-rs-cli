@@ -1,5 +1,5 @@
 [package]
-name = "spine-renderer-rs"
+name = "spine-rs-cli"
 version = "0.1.0"
 edition = "2021"
 
@@ -17,5 +17,5 @@ image = { version = "0.24", default-features = false, features = [
 clap = { version = "4.3", features = ["derive"] }
 
 [[bin]]
-name = "spine-renderer-rs"
+name = "spine-rs-cli"
 path = "src/main.rs"
