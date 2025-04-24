@@ -11,7 +11,7 @@ use std::{
 };
 mod spine;
 use miniquad::*;
-use spine::{Render, Spine, SpineInfo, SpineSkeletonPath, SpineTexture};
+use spine::{Stage, SpineInfo, SpineSkeletonPath, SpineTexture};
 
 // 1. Struct globale du CLI
 #[derive(Parser, Debug)]
@@ -35,7 +35,7 @@ enum Commands {
         atlas: PathBuf,
 
         /// Chemin de sortie pour le PNG généré
-        #[arg(long, value_name = "FILE", default_value = "out.png")]
+        #[arg(long, value_name = "FILE", default_value = "none")]
         out: PathBuf,
 
         /// Skin de base (ex. "broccoli")
@@ -153,7 +153,6 @@ pub fn render(
         .into_boxed_str();
     let skeleton_path_static: &'static str = Box::leak(skeleton_path_string);
 
-
     let conf = conf::Conf {
         window_title: "rusty_spine".to_owned(),
         high_dpi: true,
@@ -171,13 +170,6 @@ pub fn render(
         atlas_page.renderer_object().dispose::<SpineTexture>();
     });
 
-    println!("Atlas path: {}", atlas_path.display());
-    println!("Skeleton path: {}", json_path.display());
-    println!("Output path: {}", output_path.display());
-    println!("Base skin: {}", base_skin);
-    println!("Additional skins: {:?}", skins_to_add);
-    println!("Output path: {}", output_path.display());
-
     // 2) Passe les références &atlas_path_str et &skeleton_path_str
     let spine_info = SpineInfo {
         atlas_path: atlas_path_static,
@@ -190,8 +182,17 @@ pub fn render(
     };
     let spine_info_static: &'static SpineInfo = Box::leak(Box::new(spine_info));
 
+    let render_png: &'static bool = Box::leak(Box::new(output_path.to_str().unwrap() != "none"));
+    let output_path_static: &'static str = Box::leak(
+        output_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid output path"))?
+            .to_owned()
+            .into_boxed_str(),
+    );
+
     miniquad::start(conf, |ctx| {
-        Box::new(Render::new(ctx, texture_delete_queue, spine_info_static))
+        Box::new(Stage::new(ctx, texture_delete_queue, spine_info_static, render_png, output_path_static))
     });
 
     Ok(())

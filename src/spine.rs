@@ -1,14 +1,15 @@
-use std::sync::{Arc, Mutex};
-
-use glam::{Mat4, Vec2, Vec3};
+use glam::{Mat4, Vec2};
+use image::{ImageBuffer, Rgba};
 use miniquad::*;
+use miniquad::{FilterMode, RenderPass, TextureFormat, TextureParams, TextureWrap};
 use rusty_spine::{
-    atlas::{AtlasFilter, AtlasFormat, AtlasWrap},
     controller::{SkeletonController, SkeletonControllerSettings},
     draw::{ColorSpace, CullDirection},
     AnimationEvent, AnimationStateData, Atlas, BlendMode, Color, Physics, SkeletonBinary,
     SkeletonJson, Skin,
 };
+use std::process::exit;
+use std::sync::{Arc, Mutex};
 
 const MAX_MESH_VERTICES: usize = 10000;
 const MAX_MESH_INDICES: usize = 5000;
@@ -136,12 +137,12 @@ impl Spine {
 
         controller.settings.premultiplied_alpha = premultiplied_alpha;
         let mut pos = info.position;
-        pos.y -= 200.0;
+        pos.y -= 300.0;
         println!("Position: {:?}", pos);
         Self {
             controller,
             world: Mat4::from_translation(pos.extend(0.))
-            * Mat4::from_scale(Vec2::splat(info.scale * 0.8).extend(1.)),
+                * Mat4::from_scale(Vec2::splat(info.scale).extend(1.)),
             cull_face: match info.backface_culling {
                 false => CullFace::Nothing,
                 true => CullFace::Back,
@@ -150,31 +151,68 @@ impl Spine {
     }
 }
 
-pub struct Render {
+pub struct Stage {
     spine: Spine,
     pipeline: Pipeline,
     bindings: Vec<Bindings>,
     texture_delete_queue: Arc<Mutex<Vec<Texture>>>,
     last_frame_time: f64,
     screen_size: Vec2,
+    render_png: bool,
+    render_pass: RenderPass,
+    color_texture: Texture,
+    png_path: String,
 }
 
-impl Render {
+impl Stage {
     pub fn new(
         ctx: &mut Context,
         texture_delete_queue: Arc<Mutex<Vec<Texture>>>,
         spine_info: &SpineInfo,
-    ) -> Render {
+        render_png: &bool,
+        png_path: &str,
+    ) -> Stage {
+        // --- création de la texture et du render pass ---
+        let (w_px, h_px) = (
+            (800. * ctx.dpi_scale()) as u32,
+            (800. * ctx.dpi_scale()) as u32,
+        );
+        let color_tex = Texture::new_render_texture(
+            ctx,
+            TextureParams {
+                format: TextureFormat::RGBA8,
+                wrap: TextureWrap::Clamp,
+                filter: FilterMode::Nearest,
+                width: w_px,
+                height: h_px,
+                ..Default::default()
+            },
+        );
+        let depth_tex = Texture::new_render_texture(
+            ctx,
+            TextureParams {
+                format: TextureFormat::Depth,
+                height: h_px,
+                width: w_px,
+                ..Default::default()
+            },
+        );
+        let render_pass = RenderPass::new(ctx, color_tex, Some(depth_tex));
+
         let spine_info = *spine_info;
         let spine = Spine::load(spine_info);
 
-        Render {
+        Stage {
             spine,
             pipeline: create_pipeline(ctx),
             bindings: vec![],
             texture_delete_queue,
             last_frame_time: date::now(),
-            screen_size: Vec2::new(800., 600.),
+            screen_size: Vec2::new(w_px as f32, h_px as f32),
+            render_png: *render_png,
+            render_pass,
+            color_texture: color_tex,
+            png_path: png_path.to_string(),
         }
     }
 
@@ -190,7 +228,7 @@ impl Render {
     }
 }
 
-impl EventHandler for Render {
+impl EventHandler for Stage {
     fn update(&mut self, _ctx: &mut Context) {
         let now = date::now();
         let dt = ((now - self.last_frame_time) as f32).max(0.001);
@@ -220,110 +258,251 @@ impl EventHandler for Render {
             });
         }
 
-        // Delete textures that are no longer used. The delete call needs to happen here, before
-        // rendering, or it may not actually delete the texture.
-        for texture_delete in self.texture_delete_queue.lock().unwrap().drain(..) {
-            texture_delete.delete();
-        }
+        if self.render_png {
+            // --- on dessine dans notre RenderPass au lieu du default backbuffer ---
+            let pass_action = miniquad::PassAction::clear_color(0.1, 0.1, 0.1, 0.0);
+            ctx.begin_pass(self.render_pass, pass_action);
+            ctx.apply_pipeline(&self.pipeline);
+            ctx.set_cull_face(self.spine.cull_face);
 
-        // Begin frame
-        ctx.begin_default_pass(Default::default());
-        ctx.clear(Some((0.1, 0.1, 0.1, 0.0)), None, None);
-        ctx.apply_pipeline(&self.pipeline);
-
-        // Apply backface culling only if this skeleton needs it
-        ctx.set_cull_face(self.spine.cull_face);
-
-        let view = self.view();
-        for (renderable, bindings) in renderables.into_iter().zip(self.bindings.iter_mut()) {
-            // Set blend state based on this renderable's blend mode
-            let BlendStates {
-                alpha_blend,
-                color_blend,
-            } = renderable
-                .blend_mode
-                .get_blend_states(self.spine.controller.settings.premultiplied_alpha);
-            ctx.set_blend(Some(color_blend), Some(alpha_blend));
-
-            // Create the vertex and index buffers for miniquad
-            let mut vertices = vec![];
-            for vertex_index in 0..renderable.vertices.len() {
-                vertices.push(Vertex {
-                    position: Vec2 {
-                        x: renderable.vertices[vertex_index][0],
-                        y: renderable.vertices[vertex_index][1],
-                    },
-                    uv: Vec2 {
-                        x: renderable.uvs[vertex_index][0],
-                        y: renderable.uvs[vertex_index][1],
-                    },
-                    color: Color::from(renderable.colors[vertex_index]),
-                    dark_color: Color::from(renderable.dark_colors[vertex_index]),
-                });
-            }
-            bindings.vertex_buffers[0].update(ctx, &vertices);
-            bindings.index_buffer.update(ctx, &renderable.indices);
-
-            // If there is no attachment (and therefore no texture), skip rendering this renderable
-            // May also be None if a create texture callback was never set.
-            let Some(attachment_renderer_object) = renderable.attachment_renderer_object else {
-                continue;
-            };
-
-            // Load textures if they haven't been loaded already
-            let spine_texture = unsafe { &mut *(attachment_renderer_object as *mut SpineTexture) };
-            let texture = match spine_texture {
-                SpineTexture::NeedsToBeLoaded {
-                    path,
-                    min_filter,
-                    mag_filter,
-                    x_wrap,
-                    y_wrap,
-                    format,
-                } => {
-                    use image::io::Reader as ImageReader;
-
-                    #[allow(clippy::needless_borrows_for_generic_args)]
-                    let image = ImageReader::open(&path)
-                        .unwrap_or_else(|_| panic!("failed to open image: {}", &path))
-                        .decode()
-                        .unwrap_or_else(|_| panic!("failed to decode image: {}", &path));
-                    let texture_params = TextureParams {
-                        width: image.width(),
-                        height: image.height(),
-                        format: *format,
-                        ..Default::default()
-                    };
-                    let texture = match format {
-                        TextureFormat::RGB8 => {
-                            Texture::from_data_and_format(ctx, &image.to_rgb8(), texture_params)
-                        }
-                        TextureFormat::RGBA8 => {
-                            Texture::from_data_and_format(ctx, &image.to_rgba8(), texture_params)
-                        }
-                        _ => unreachable!(),
-                    };
-                    texture.set_filter_min_mag(ctx, *min_filter, *mag_filter);
-                    texture.set_wrap_xy(ctx, *x_wrap, *y_wrap);
-                    *spine_texture = SpineTexture::Loaded(texture);
-                    texture
+            let view = self.view();
+            for (renderable, bindings) in renderables.into_iter().zip(self.bindings.iter_mut()) {
+                let BlendStates {
+                    alpha_blend,
+                    color_blend,
+                } = renderable
+                    .blend_mode
+                    .get_blend_states(self.spine.controller.settings.premultiplied_alpha);
+                ctx.set_blend(Some(color_blend), Some(alpha_blend));
+                // Préparation des vertex/index buffers et des textures
+                let mut vertices = Vec::with_capacity(renderable.vertices.len());
+                for i in 0..renderable.vertices.len() {
+                    vertices.push(Vertex {
+                        position: Vec2 {
+                            x: renderable.vertices[i][0],
+                            y: renderable.vertices[i][1],
+                        },
+                        uv: Vec2 {
+                            x: renderable.uvs[i][0],
+                            y: renderable.uvs[i][1],
+                        },
+                        color: Color::from(renderable.colors[i]),
+                        dark_color: Color::from(renderable.dark_colors[i]),
+                    });
                 }
-                SpineTexture::Loaded(texture) => *texture,
-            };
-            bindings.images = vec![texture];
+                bindings.vertex_buffers[0].update(ctx, &vertices);
+                bindings.index_buffer.update(ctx, &renderable.indices);
 
-            // Draw this renderable
-            ctx.apply_bindings(bindings);
-            ctx.apply_uniforms(&shader::Uniforms {
-                world: self.spine.world,
-                view,
-            });
-            ctx.draw(0, renderable.indices.len() as i32, 1);
+                // Si pas d'attachement (pas de texture), on skip ce renderable
+                let Some(attachment_renderer_object) = renderable.attachment_renderer_object else {
+                    continue;
+                };
+                let spine_texture =
+                    unsafe { &mut *(attachment_renderer_object as *mut SpineTexture) };
+                let texture = match spine_texture {
+                    SpineTexture::NeedsToBeLoaded {
+                        path,
+                        min_filter,
+                        mag_filter,
+                        x_wrap,
+                        y_wrap,
+                        format,
+                    } => {
+                        // on emprunte path au lieu de le déplacer
+                        let image = image::io::Reader::open(&*path)
+                            .unwrap_or_else(|_| panic!("failed to open image: {}", path))
+                            .decode()
+                            .unwrap_or_else(|_| panic!("failed to decode image: {}", path));
+                        // création de la texture GPU
+                        let params = TextureParams {
+                            width: image.width(),
+                            height: image.height(),
+                            format: *format,
+                            ..Default::default()
+                        };
+                        let tex = match format {
+                            TextureFormat::RGB8 => {
+                                Texture::from_data_and_format(ctx, &image.to_rgb8(), params)
+                            }
+                            TextureFormat::RGBA8 => {
+                                Texture::from_data_and_format(ctx, &image.to_rgba8(), params)
+                            }
+                            _ => unreachable!(),
+                        };
+                        tex.set_filter_min_mag(ctx, *min_filter, *mag_filter);
+                        tex.set_wrap_xy(ctx, *x_wrap, *y_wrap);
+                        // on remplace l'état pour ne plus recharger la prochaine frame
+                        *spine_texture = SpineTexture::Loaded(tex);
+                        // et on en extrait le handle (Texture est Copy)
+                        if let SpineTexture::Loaded(t) = spine_texture {
+                            *t
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                    SpineTexture::Loaded(t) => *t,
+                };
+                bindings.images = vec![texture];
+
+                ctx.apply_bindings(bindings);
+                ctx.apply_uniforms(&shader::Uniforms {
+                    world: self.spine.world,
+                    view,
+                });
+                ctx.draw(0, renderable.indices.len() as i32, 1);
+            }
+
+            ctx.end_render_pass();
+            ctx.commit_frame();
+
+            // Lit le pixel buffer RGBA depuis la texture
+            // width and height in *pixels* (after applying DPI scale)
+            let w = (self.screen_size.x * ctx.dpi_scale()) as usize;
+            let h = (self.screen_size.y * ctx.dpi_scale()) as usize;
+
+            // allocate a buffer for RGBA8 bytes
+            let mut pixels = vec![0u8; w * h * 4];
+
+            // actually read them back from the GPU
+            self.color_texture.read_pixels(&mut pixels);
+
+            // flip vertically in-place
+            // flip vertically in-place
+            let line_bytes = w * 4;
+            for y in 0..(h / 2) {
+                let top_start = y * line_bytes;
+                let bot_start = (h - 1 - y) * line_bytes;
+
+                // split into [0 .. bot_start) and [bot_start .. end);
+                // these two slices are guaranteed non-overlapping
+                let (prefix, suffix) = pixels.split_at_mut(bot_start);
+
+                // within prefix, take the top row
+                let top_row = &mut prefix[top_start..top_start + line_bytes];
+                // within suffix, take the bottom row (which is at the start of suffix)
+                let bottom_row = &mut suffix[..line_bytes];
+
+                // now swap them
+                top_row.swap_with_slice(bottom_row);
+            }
+
+            // then build your ImageBuffer and save as before
+            let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(w as u32, h as u32, pixels)
+                .expect("Erreur création ImageBuffer");
+            img.save(self.png_path.clone())
+                .expect("Impossible d’enregistrer frame0.png");
+            println!("✅ Première frame écrite dans {}", self.png_path);
+
+            exit(0);
+        } else {
+            // Delete textures that are no longer used. The delete call needs to happen here, before
+            // rendering, or it may not actually delete the texture.
+            for texture_delete in self.texture_delete_queue.lock().unwrap().drain(..) {
+                texture_delete.delete();
+            }
+
+            // Begin frame
+            ctx.begin_default_pass(Default::default());
+            ctx.clear(Some((0.1, 0.1, 0.1, 0.0)), None, None);
+            ctx.apply_pipeline(&self.pipeline);
+
+            // Apply backface culling only if this skeleton needs it
+            ctx.set_cull_face(self.spine.cull_face);
+
+            let view = self.view();
+            for (renderable, bindings) in renderables.into_iter().zip(self.bindings.iter_mut()) {
+                // Set blend state based on this renderable's blend mode
+                let BlendStates {
+                    alpha_blend,
+                    color_blend,
+                } = renderable
+                    .blend_mode
+                    .get_blend_states(self.spine.controller.settings.premultiplied_alpha);
+                ctx.set_blend(Some(color_blend), Some(alpha_blend));
+
+                // Create the vertex and index buffers for miniquad
+                let mut vertices = vec![];
+                for vertex_index in 0..renderable.vertices.len() {
+                    vertices.push(Vertex {
+                        position: Vec2 {
+                            x: renderable.vertices[vertex_index][0],
+                            y: renderable.vertices[vertex_index][1],
+                        },
+                        uv: Vec2 {
+                            x: renderable.uvs[vertex_index][0],
+                            y: renderable.uvs[vertex_index][1],
+                        },
+                        color: Color::from(renderable.colors[vertex_index]),
+                        dark_color: Color::from(renderable.dark_colors[vertex_index]),
+                    });
+                }
+                bindings.vertex_buffers[0].update(ctx, &vertices);
+                bindings.index_buffer.update(ctx, &renderable.indices);
+
+                // If there is no attachment (and therefore no texture), skip rendering this renderable
+                // May also be None if a create texture callback was never set.
+                let Some(attachment_renderer_object) = renderable.attachment_renderer_object else {
+                    continue;
+                };
+
+                // Load textures if they haven't been loaded already
+                let spine_texture =
+                    unsafe { &mut *(attachment_renderer_object as *mut SpineTexture) };
+                let texture = match spine_texture {
+                    SpineTexture::NeedsToBeLoaded {
+                        path,
+                        min_filter,
+                        mag_filter,
+                        x_wrap,
+                        y_wrap,
+                        format,
+                    } => {
+                        use image::io::Reader as ImageReader;
+
+                        #[allow(clippy::needless_borrows_for_generic_args)]
+                        let image = ImageReader::open(&path)
+                            .unwrap_or_else(|_| panic!("failed to open image: {}", &path))
+                            .decode()
+                            .unwrap_or_else(|_| panic!("failed to decode image: {}", &path));
+                        let texture_params = TextureParams {
+                            width: image.width(),
+                            height: image.height(),
+                            format: *format,
+                            ..Default::default()
+                        };
+                        let texture = match format {
+                            TextureFormat::RGB8 => {
+                                Texture::from_data_and_format(ctx, &image.to_rgb8(), texture_params)
+                            }
+                            TextureFormat::RGBA8 => Texture::from_data_and_format(
+                                ctx,
+                                &image.to_rgba8(),
+                                texture_params,
+                            ),
+                            _ => unreachable!(),
+                        };
+                        texture.set_filter_min_mag(ctx, *min_filter, *mag_filter);
+                        texture.set_wrap_xy(ctx, *x_wrap, *y_wrap);
+                        *spine_texture = SpineTexture::Loaded(texture);
+                        texture
+                    }
+                    SpineTexture::Loaded(texture) => *texture,
+                };
+                bindings.images = vec![texture];
+
+                // Draw this renderable
+                ctx.apply_bindings(bindings);
+                ctx.apply_uniforms(&shader::Uniforms {
+                    world: self.spine.world,
+                    view,
+                });
+                ctx.draw(0, renderable.indices.len() as i32, 1);
+            }
+
+            // End frame
+            ctx.end_render_pass();
+            ctx.commit_frame();
         }
-
-        // End frame
-        ctx.end_render_pass();
-        ctx.commit_frame();
     }
 
     fn resize_event(&mut self, ctx: &mut Context, width: f32, height: f32) {
